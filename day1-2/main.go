@@ -17,7 +17,10 @@ func main() {
 	lines := splitLines(data)
 	start := 50
 
-	pass, err := countZeroPositions(start, lines)
+	pass, err := countZeroHits(start, lines)
+	if err != nil {
+		panic(err)
+	}
 	fmt.Printf("password: %d", pass)
 }
 
@@ -50,7 +53,7 @@ func parseTurn(line []byte) (int, string, error) {
 	return i, direction, nil
 }
 
-func countZeroPositions(start int, turns [][]byte) (int, error) {
+func countZeroHits(start int, turns [][]byte) (int, error) {
 	pos := start
 	count := 0
 	for _, turn := range turns {
