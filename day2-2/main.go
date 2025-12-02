@@ -64,9 +64,7 @@ func validateIDs(start, end int) []int {
 }
 
 func invalidID(id string) bool {
-	n := len(id)
-
-	for m := 1; m <= n/2; m++ {
+	for m := 1; m <= len(id)/2; m++ {
 		if isRepeatedPattern(id, m) {
 			return true
 		}
