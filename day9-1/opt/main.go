@@ -3,7 +3,6 @@ package main
 import (
 	"bytes"
 	"fmt"
-	"math"
 	"os"
 	"strconv"
 	"time"
@@ -12,21 +11,21 @@ import (
 func main() {
 	start := time.Now()
 
-	path := "./input.txt"
+	path := "../input.txt"
 	data, err := os.ReadFile(path)
 	if err != nil {
 		panic(err)
 	}
 
 	lines := bytes.Split(data, []byte("\n"))
-	redTiles := getRedTiles(lines)
+	vertices := getVertices(lines)
 
 	maxArea := 0
-	for i := 0; i < len(redTiles); i++ {
-		for j := i + 1; j < len(redTiles); j++ {
-			currArea := redTiles[i].area(redTiles[j])
-			if maxArea < currArea {
-				maxArea = currArea
+	for i := 0; i < len(vertices); i++ {
+		for j := i + 1; j < len(vertices); j++ {
+			area := Rectangle{vertices[i], vertices[j]}.Area()
+			if maxArea < area {
+				maxArea = area
 			}
 		}
 	}
@@ -36,20 +35,33 @@ func main() {
 	fmt.Printf("time elapsed: %vs\n", elapsed)
 }
 
-type point struct {
-	x, y int
+type Point struct {
+	x int
+	y int
 }
 
-func (p point) area(q point) int {
-	dx := math.Abs(float64(p.x-q.x)) + 1
-	dy := math.Abs(float64(p.y-q.y)) + 1
-
-	return int(dx * dy)
+type Rectangle struct {
+	v1 Point
+	v2 Point
 }
 
-func getRedTiles(input [][]byte) []point {
-	points := []point{}
-	for _, line := range input {
+func (r Rectangle) Area() int {
+	dx := r.v1.x - r.v2.x
+	if dx < 0 {
+		dx = -dx
+	}
+
+	dy := r.v1.y - r.v2.y
+	if dy < 0 {
+		dy = -dy
+	}
+
+	return dx * dy
+}
+
+func getVertices(lines [][]byte) []Point {
+	points := []Point{}
+	for _, line := range lines {
 		if len(line) == 0 {
 			continue
 		}
@@ -69,7 +81,7 @@ func getRedTiles(input [][]byte) []point {
 			panic(err)
 		}
 
-		points = append(points, point{x, y})
+		points = append(points, Point{x, y})
 	}
 
 	return points

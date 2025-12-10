@@ -6,9 +6,12 @@ import (
 	"math"
 	"os"
 	"strconv"
+	"time"
 )
 
 func main() {
+	start := time.Now()
+
 	path := "./input.txt"
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -35,7 +38,9 @@ func main() {
 		}
 	}
 
+	elapsed := time.Since(start).Seconds()
 	fmt.Printf("the largest area possible is: %d\n", maxArea)
+	fmt.Printf("time elapsed: %vs\n", elapsed)
 }
 
 type point struct {
