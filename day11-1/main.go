@@ -71,22 +71,22 @@ func topologicalSort(nodes []Node) []Node {
 	queue := []Node{}
 	result := []Node{}
 
-	inPaths := make(map[string]int)
-	nodeById := make(map[string]Node)
+	inDegree := make(map[string]int)
+	nodeByID := make(map[string]Node)
 
 	for _, node := range nodes {
-		nodeById[node.id] = node
-		inPaths[node.id] = 0
+		nodeByID[node.id] = node
+		inDegree[node.id] = 0
 	}
 
 	for _, node := range nodes {
 		for _, edge := range node.edges {
-			inPaths[edge]++
+			inDegree[edge]++
 		}
 	}
 
 	for _, node := range nodes {
-		if inPaths[node.id] == 0 {
+		if inDegree[node.id] == 0 {
 			queue = append(queue, node)
 		}
 	}
@@ -96,9 +96,9 @@ func topologicalSort(nodes []Node) []Node {
 		result = append(result, currNode)
 
 		for _, edge := range currNode.edges {
-			inPaths[edge]--
-			if inPaths[edge] == 0 {
-				queue = append(queue, nodeById[edge])
+			inDegree[edge]--
+			if inDegree[edge] == 0 {
+				queue = append(queue, nodeByID[edge])
 			}
 		}
 	}
