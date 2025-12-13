@@ -3,9 +3,11 @@ package main
 import (
 	"bytes"
 	"fmt"
+	"math"
 	"os"
-	"slices"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -30,7 +32,7 @@ func main() {
 			panic(err)
 		}
 
-		machines = append(machines, *machine)
+		machines = append(machines, machine)
 	}
 
 	totalPresses := 0
@@ -46,92 +48,398 @@ func main() {
 }
 
 type Machine struct {
-	Indicator Indicator
-	Buttons   []Button
-	Joltage   Joltage
+	Indicator        Indicator
+	Buttons          []Button
+	Joltage          Joltage
+	Cache            map[CacheKey]int
+	CounterToButtons [][]int
 }
 
-func (m Machine) Configure() int {
-	n := 1
+type CacheKey struct {
+	i    int
+	mask uint64
+}
 
-	for {
-		q := Queue{
-			cache: make(map[[2]string]bool),
-		}
+func (m *Machine) Configure() int {
+	// Ensure dp cache populated
+	_ = m.dp(0, 0)
 
-		startNode := Node{make([]int, len(m.Joltage.Indexes)), n}
+	minParity := m.dp(0, 0)
+	if minParity > len(m.Buttons) {
+		panic("no parity solution")
+	}
 
-		q.Push(startNode)
+	bestTotal := math.MaxInt
 
-		for !q.isEmpty() {
-			node := q.Pop()
-			skip := false
+	// Small slack is usually enough; bump if needed.
+	// You can start with 0,2,4,... and stop early using bestTotal.
+	for slack := 0; slack <= len(m.Buttons); slack += 2 {
+		maxParity := minParity + slack
 
-			for i := range len(m.Joltage.Indexes) {
-				if node.joltageVals[i] > m.Joltage.Indexes[i] {
-					skip = true
-				}
-			}
+		ps := m.allParityVectorsUpTo(maxParity)
 
-			if skip {
+		// Try cheaper parity vectors first (helps bound early)
+		sort.Slice(ps, func(i, j int) bool {
+			return m.parityCost(ps[i]) < m.parityCost(ps[j])
+		})
+
+		for _, p := range ps {
+			pCost := m.parityCost(p)
+
+			// Early prune: even with kCost=0 we'd be worse
+			if pCost >= bestTotal {
 				continue
 			}
 
-			if m.AttemptConfigure(node.joltageVals, node.depth, &q) {
-				return node.depth
+			r := m.remainingVector(p)
+
+			kCost, ok := m.solveK(r)
+			if !ok {
+				continue
+			}
+
+			total := pCost + 2*kCost
+			if total < bestTotal {
+				bestTotal = total
 			}
 		}
 
-		n++
+		// Early stop: next slack increases parity by at least 2 presses.
+		// If we already have a solution with total == min possible for this slack,
+		// further slack cannot beat it.
+		if bestTotal != math.MaxInt && minParity+slack >= bestTotal {
+			break
+		}
+	}
+
+	if bestTotal == math.MaxInt {
+		panic("no solution for machine")
+	}
+	return bestTotal
+}
+
+func (m *Machine) dp(i int, mask uint64) int {
+	if v, ok := m.Cache[CacheKey{i, mask}]; ok {
+		return v
+	}
+
+	if mask == m.Joltage.ParityMask {
+		m.Cache[CacheKey{i, mask}] = 0
+		return 0
+	}
+
+	if i == len(m.Buttons) {
+		return len(m.Buttons) + 1
+	}
+
+	skip := m.dp(i+1, mask)
+	use := 1 + m.dp(i+1, m.Buttons[i].IndicatorPress(mask))
+
+	result := min(skip, use)
+	m.Cache[CacheKey{i, mask}] = result
+	return result
+}
+
+func (m *Machine) allParityVectorsUpTo(maxCost int) [][]int {
+	// Ensure DP cache populated
+	_ = m.dp(0, 0)
+
+	n := len(m.Buttons)
+	curr := make([]int, n)
+	var out [][]int
+
+	var rec func(i int, mask uint64)
+	rec = func(i int, mask uint64) {
+		// If already at target, force tail to 0 and record solution.
+		if mask == m.Joltage.ParityMask {
+			sol := make([]int, n)
+			copy(sol, curr)
+			for t := i; t < n; t++ {
+				sol[t] = 0
+			}
+			out = append(out, sol)
+			return
+		}
+
+		if i == n {
+			return
+		}
+
+		// Prune: if even the optimal dp from here exceeds maxCost, stop.
+		if m.dp(i, mask) > maxCost {
+			return
+		}
+
+		// Option 1: skip
+		curr[i] = 0
+		if m.dp(i+1, mask) <= maxCost {
+			rec(i+1, mask)
+		}
+
+		// Option 2: use
+		nextMask := m.Buttons[i].IndicatorPress(mask)
+		curr[i] = 1
+		if 1+m.dp(i+1, nextMask) <= maxCost {
+			rec(i+1, nextMask)
+		}
+
+		curr[i] = 0
+	}
+
+	rec(0, 0)
+	return out
+}
+
+func (m *Machine) parityCost(p []int) int {
+	c := 0
+	for _, v := range p {
+		c += v
+	}
+	return c
+}
+
+func (m *Machine) solveK(r []int) (int, bool) {
+	assigned := make([]bool, len(m.Buttons))
+
+	state := SolverState{
+		r:        append([]int(nil), r...),
+		upper:    m.upperVector(r, assigned),
+		assigned: assigned,
+		cost:     0,
+	}
+
+	bestCost := math.MaxInt
+	search(m, state, &bestCost)
+
+	if bestCost == math.MaxInt {
+		return 0, false
+	}
+	return bestCost, true
+}
+
+func (m *Machine) remainingVector(p []int) []int {
+	c := make([]int, len(m.Joltage.Values))
+	for i, b := range m.Buttons {
+		if p[i] == 1 {
+			for _, idx := range b.Counters {
+				c[idx]++
+			}
+		}
+	}
+
+	r := make([]int, len(m.Joltage.Values))
+	for i := range r {
+		diff := m.Joltage.Values[i] - c[i]
+		if diff < 0 || diff%2 != 0 {
+			panic(fmt.Errorf("invalid parity choice: %+v", p))
+		}
+
+		r[i] = diff / 2
+	}
+
+	return r
+}
+
+func (m *Machine) upperVector(r []int, assigned []bool) []int {
+	u := make([]int, len(m.Buttons))
+
+	for i, b := range m.Buttons {
+		if len(b.Counters) == 0 {
+			u[i] = 0
+			continue
+		}
+
+		if assigned[i] {
+			u[i] = 0
+			continue
+		}
+
+		ub := math.MaxInt
+		for _, ctr := range b.Counters {
+			ub = min(ub, r[ctr])
+		}
+
+		u[i] = ub
+	}
+
+	return u
+}
+
+type SolverState struct {
+	r        []int
+	upper    []int
+	assigned []bool
+	cost     int
+}
+
+func (s *SolverState) assign(m *Machine, j int, v int) bool {
+	for _, idx := range m.Buttons[j].Counters {
+		s.r[idx] -= v
+		if s.r[idx] < 0 {
+			return false
+		}
+	}
+
+	s.cost += v
+	s.assigned[j] = true
+
+	s.upper = m.upperVector(s.r, s.assigned)
+
+	return true
+}
+
+func (s *SolverState) solved() bool {
+	for _, need := range s.r {
+		if need != 0 {
+			return false
+		}
+	}
+
+	return true
+}
+
+func (s *SolverState) chooseButton() int {
+	best := -1
+	bestUB := math.MaxInt
+
+	for j := range s.upper {
+		if s.assigned[j] {
+			continue
+		}
+
+		ub := s.upper[j]
+		if ub <= 0 {
+			continue
+		}
+
+		if ub < bestUB {
+			bestUB = ub
+			best = j
+		}
+	}
+
+	return best
+}
+
+func (s *SolverState) cloneState() SolverState {
+	r2 := make([]int, len(s.r))
+	copy(r2, s.r)
+
+	u2 := make([]int, len(s.upper))
+	copy(u2, s.upper)
+
+	a2 := make([]bool, len(s.assigned))
+	copy(a2, s.assigned)
+
+	return SolverState{
+		r:        r2,
+		upper:    u2,
+		assigned: a2,
+		cost:     s.cost,
 	}
 }
 
-func (m Machine) AttemptConfigure(curr []int, n int, q *Queue) bool {
-	fmt.Printf("attempting configuration with curr: %v, n: %d\n", curr, n)
-	if n == 0 {
-		return false
-	}
+func propagate(m *Machine, s *SolverState) bool {
+	for {
+		changed := false
 
-	for _, button := range m.Buttons {
-		val := button.Press(curr)
-		if slices.Equal(val, m.Joltage.Indexes) {
+		for i, need := range s.r {
+			if need == 0 {
+				continue
+			}
+
+			feasible := -1
+			for _, j := range m.CounterToButtons[i] {
+				if !s.assigned[j] && s.upper[j] > 0 {
+					if feasible == -1 {
+						feasible = j
+					} else {
+						feasible = -2
+						break
+					}
+				}
+			}
+
+			if feasible == -1 {
+				return false
+			}
+
+			if feasible >= 0 {
+				v := need
+				if v > s.upper[feasible] {
+					return false
+				}
+				if !s.assign(m, feasible, v) {
+					return false
+				}
+				changed = true
+				break
+			}
+		}
+
+		if !changed {
 			return true
 		}
+	}
+}
 
-		valString := fmt.Sprint(val)
-		depthString := fmt.Sprint(n - 1)
-		if !q.cache[[2]string{valString, depthString}] {
-			q.Push(Node{val, n - 1})
-			q.cache[[2]string{valString, depthString}] = true
-		}
+func search(m *Machine, s SolverState, bestCost *int) {
+	if s.cost >= *bestCost {
+		return
 	}
 
-	return false
+	if !propagate(m, &s) {
+		return
+	}
+
+	if s.solved() {
+		if s.cost < *bestCost {
+			*bestCost = s.cost
+		}
+		return
+	}
+
+	j := s.chooseButton()
+	if j == -1 {
+		return
+	}
+
+	for v := 0; v <= s.upper[j]; v++ {
+		next := s.cloneState()
+		if !next.assign(m, j, v) {
+			continue
+		}
+		if next.cost >= *bestCost {
+			continue
+		}
+		search(m, next, bestCost)
+	}
 }
 
 type Indicator struct {
-	RawInput string
+	BinaryString string
+	BinaryValue  uint64
+}
+
+func (i Indicator) Length() int {
+	return len(i.BinaryString)
 }
 
 type Button struct {
-	Indexes []int
+	BinaryValue uint64
+	Counters    []int
 }
 
-func (b Button) Press(input []int) []int {
-	output := make([]int, len(input))
-	copy(output, input)
-	for _, idx := range b.Indexes {
-		output[idx]++
-	}
-
-	return output
+func (b Button) IndicatorPress(input uint64) uint64 {
+	return input ^ b.BinaryValue
 }
 
 type Joltage struct {
-	Indexes []int
+	Values     []int
+	ParityMask uint64
 }
 
-func parseLine(input []byte) (*Machine, error) {
+func parseLine(input []byte) (Machine, error) {
 	tokens := bytes.Split(input, []byte(" "))
 
 	n := len(tokens)
@@ -141,14 +449,14 @@ func parseLine(input []byte) (*Machine, error) {
 
 	indicator, err := parseIndicatorToken(indicatorToken)
 	if err != nil {
-		return nil, err
+		return Machine{}, err
 	}
 
 	buttons := []Button{}
 	for _, buttonToken := range buttonTokens {
 		button, err := parseButtonToken(buttonToken)
 		if err != nil {
-			return nil, err
+			return Machine{}, err
 		}
 
 		buttons = append(buttons, button)
@@ -156,10 +464,19 @@ func parseLine(input []byte) (*Machine, error) {
 
 	joltage, err := parseJoltageToken(joltageToken)
 	if err != nil {
-		return nil, err
+		return Machine{}, err
 	}
 
-	return &Machine{indicator, buttons, joltage}, nil
+	cache := make(map[CacheKey]int)
+
+	counterToButtons := make([][]int, len(joltage.Values))
+	for i, b := range buttons {
+		for _, idx := range b.Counters {
+			counterToButtons[idx] = append(counterToButtons[idx], i)
+		}
+	}
+
+	return Machine{indicator, buttons, joltage, cache, counterToButtons}, nil
 }
 
 func parseIndicatorToken(token []byte) (Indicator, error) {
@@ -168,9 +485,25 @@ func parseIndicatorToken(token []byte) (Indicator, error) {
 		return Indicator{}, fmt.Errorf("invalid indicator token: %s", string(token))
 	}
 
-	s := string(token)
+	var b strings.Builder
+	for _, c := range token {
+		switch c {
+		case '.':
+			b.WriteString("0")
+		case '#':
+			b.WriteString("1")
+		default:
+			continue
+		}
+	}
 
-	return Indicator{s}, nil
+	binaryString := b.String()
+	binaryVal, err := strconv.ParseUint(binaryString, 2, 0)
+	if err != nil {
+		return Indicator{}, err
+	}
+
+	return Indicator{binaryString, binaryVal}, nil
 }
 
 func parseButtonToken(token []byte) (Button, error) {
@@ -182,16 +515,23 @@ func parseButtonToken(token []byte) (Button, error) {
 	indexes := []int{}
 	for _, c := range token {
 		if c >= '0' && c <= '9' {
-			n, err := strconv.Atoi(string(c))
+			v, err := strconv.Atoi(string(c))
 			if err != nil {
 				return Button{}, err
 			}
 
-			indexes = append(indexes, n)
+			indexes = append(indexes, v)
 		}
 	}
 
-	return Button{indexes}, nil
+	sort.Ints(indexes)
+
+	binaryVal := uint64(0)
+	for _, idx := range indexes {
+		binaryVal |= uint64(1) << uint(idx)
+	}
+
+	return Button{BinaryValue: binaryVal, Counters: indexes}, nil
 }
 
 func parseJoltageToken(token []byte) (Joltage, error) {
@@ -203,40 +543,31 @@ func parseJoltageToken(token []byte) (Joltage, error) {
 	token = token[1 : n-1]
 	valBytes := bytes.Split(token, []byte(","))
 
-	values := []int{}
-	for _, b := range valBytes {
-		n, err := strconv.Atoi(string(b))
+	values := make([]int, len(valBytes))
+	for i, b := range valBytes {
+		v, err := strconv.Atoi(string(b))
 		if err != nil {
 			return Joltage{}, err
 		}
 
-		values = append(values, n)
+		values[i] = v
 	}
 
-	return Joltage{values}, nil
+	parity := uint64(0)
+	for i, v := range values {
+		if v&1 == 1 {
+			parity |= 1 << i
+		}
+	}
+
+	return Joltage{Values: values, ParityMask: parity}, nil
 }
 
-type Queue struct {
-	slice []Node
-	head  int
-	cache map[[2]string]bool
-}
+func sum(input []int) int {
+	s := 0
+	for _, v := range input {
+		s += v
+	}
 
-func (q *Queue) Push(n Node) {
-	q.slice = append(q.slice, n)
-}
-
-func (q *Queue) Pop() Node {
-	n := q.slice[q.head]
-	q.head++
-	return n
-}
-
-func (q *Queue) isEmpty() bool {
-	return q.head == len(q.slice)
-}
-
-type Node struct {
-	joltageVals []int
-	depth       int
+	return s
 }
